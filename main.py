@@ -1,17 +1,34 @@
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 DB = "orbit.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
+if DATABASE_URL:
+    import psycopg
+    from psycopg.rows import dict_row
+
+@contextmanager
 def connect():
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
-    return db
+    if DATABASE_URL:
+        db = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    else:
+        db = sqlite3.connect(DB)
+        db.row_factory = sqlite3.Row
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 @asynccontextmanager
 async def lifespan(app):
@@ -38,7 +55,13 @@ class TaskRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "app": "ORBIT"}
+    with connect() as db:
+        db.execute("SELECT 1")
+    return {
+        "status": "healthy",
+        "app": "ORBIT",
+        "database": "postgresql" if DATABASE_URL else "sqlite"
+    }
 
 @app.get("/api/tasks")
 def list_tasks():
@@ -56,8 +79,9 @@ def create_task(data: TaskRequest):
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
+        placeholder = "%s" if DATABASE_URL else "?"
         db.execute(
-            "INSERT INTO tasks VALUES (?, ?, ?, ?)",
+            f"INSERT INTO tasks VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
             (task_id, request, "received", now)
         )
     return {"id": task_id, "request": request, "status": "received"}
